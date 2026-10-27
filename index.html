@@ -35,7 +35,7 @@ $('#back').onclick=()=>{selected=null;draw()};$('#save-detail').onclick=async()=
 $('#nav').addEventListener('click',e=>{const button=e.target.closest('[data-page]');if(!button)return;page=button.dataset.page;selected=null;search='';draw()});
 $('#content').addEventListener('click',e=>{const b=e.target.closest('[data-open]');if(b)detail(b.dataset.open)});
 $('#add-button').onclick=()=>$('#lead-dialog').showModal();$('#close-dialog').onclick=()=>$('#lead-dialog').close();
-$('#lead-form').onsubmit=async e=>{e.preventDefault();const form=Object.fromEntries(new FormData(e.currentTarget).entries());try{await api('leads',{method:'POST',body:JSON.stringify(form)});await refresh();$('#lead-dialog').close();e.currentTarget.reset();page='leads';draw()}catch(error){alert('Could not add business: '+error.message)}};
+$('#lead-form').onsubmit=async e=>{e.preventDefault();const formElement=e.currentTarget,form=Object.fromEntries(new FormData(formElement).entries()),button=formElement.querySelector('button[type="submit"],button:not([type])');if(button)button.disabled=true;try{await api('leads',{method:'POST',body:JSON.stringify(form)});formElement.reset();$('#lead-dialog').close();page='leads';await refresh()}catch(error){alert('Could not add business: '+error.message)}finally{if(button)button.disabled=false}};
 async function refresh(){const data=await api('leads');leads=data.leads;draw()}
 function gate(){
  const cover=document.createElement('section');cover.id='pl-auth';cover.style.cssText='position:fixed;inset:0;z-index:999;background:#f7f6f3;display:grid;place-items:center;padding:20px';
