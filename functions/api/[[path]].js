@@ -15,7 +15,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS lead_workspace (lead_id TEXT PRIMARY KEY,research TEXT NOT NULL DEFAULT '',opportunity TEXT NOT NULL DEFAULT '',draft TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT 'email',score INTEGER NOT NULL DEFAULT 50,archived INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS restock_policies (lead_id TEXT PRIMARY KEY,interval_months INTEGER NOT NULL DEFAULT 3,last_checked TEXT NOT NULL DEFAULT '',next_check TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS stock_counts (lead_id TEXT NOT NULL,title TEXT NOT NULL,received INTEGER NOT NULL DEFAULT 0,sold INTEGER NOT NULL DEFAULT 0,returned INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(lead_id,title))"),
- db.prepare("CREATE TABLE IF NOT EXISTS historical_stock (lead_id TEXT NOT NULL,issue TEXT NOT NULL,received INTEGER,remaining INTEGER,source TEXT NOT NULL DEFAULT '',source_date TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(lead_id,issue))")
+ db.prepare("CREATE TABLE IF NOT EXISTS historical_stock (lead_id TEXT NOT NULL,issue TEXT NOT NULL,received INTEGER,remaining INTEGER,source TEXT NOT NULL DEFAULT '',source_date TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(lead_id,issue))"),
+ db.prepare("CREATE TABLE IF NOT EXISTS editorial_campaigns (article_url TEXT PRIMARY KEY,title TEXT NOT NULL,subject TEXT NOT NULL,body TEXT NOT NULL,audience TEXT NOT NULL DEFAULT 'stockists',status TEXT NOT NULL DEFAULT 'draft',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -77,6 +78,30 @@ async function handleRequest(context){
   if(name.length<2||name.length>80||!/^[0-9]{4,8}$/.test(pin))return json({error:'Name and 4 to 8 digit PIN required.'},400);
   const salt=random();try{await db.prepare("INSERT INTO members(id,name,role,pin_salt,pin_hash) VALUES(?,?,'caller',?,?)").bind(random(),name,salt,await hashPin(pin,salt)).run();}catch{return json({error:'Could not add team member. Check for duplicate names.'},409);}
   return json({ok:true});
+ }
+ if(path==='/api/substack-feed'&&method==='GET'){
+  const target='https://parallevarmagazine.substack.com/feed';
+  let response;
+  try{response=await fetch(target,{headers:{'Accept':'application/rss+xml, application/xml, text/xml'},redirect:'follow'});}catch{return json({error:'Could not reach the publication feed.'},502)}
+  if(!response.ok)return json({error:'Substack feed returned '+response.status},502);
+  const xml=await response.text();
+  const decode=x=>String(x||'').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,'$1').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/<[^>]*>/g,'').trim();
+  const get=(item,tag)=>{const match=item.match(new RegExp('<'+tag+'(?:\\s[^>]*)?>([\\s\\S]*?)<\\/'+tag+'>','i'));return decode(match?.[1]||'')};
+  const items=(xml.match(/<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi)||[]).slice(0,30).map(item=>({title:get(item,'title'),url:get(item,'link'),published:get(item,'pubDate'),summary:get(item,'description').slice(0,500)})).filter(item=>item.title&&/^https:\/\/(parallevarmagazine\.substack\.com|substack\.com)\//.test(item.url));
+  return json({articles:items,feed:target});
+ }
+ if(path==='/api/editorial-campaigns'&&method==='GET'){
+  const {results}=await db.prepare('SELECT * FROM editorial_campaigns ORDER BY updated_at DESC').all();
+  return json({campaigns:results});
+ }
+ if(path==='/api/editorial-campaigns'&&method==='POST'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const d=await request.json().catch(()=>({}));
+  const article_url=String(d.article_url||'').trim(),title=String(d.title||'').trim(),subject=String(d.subject||'').trim(),body=String(d.body||''),audience=String(d.audience||'stockists');
+  if(!/^https:\/\/(parallevarmagazine\.substack\.com|substack\.com)\//.test(article_url)||article_url.length>1000)return json({error:'Choose an article from the Para Llevar publication.'},400);
+  if(!title||title.length>300||!subject||subject.length>300||!body||body.length>10000||!['stockists','advertisers','retail','all'].includes(audience))return json({error:'Check subject, message, and audience.'},400);
+  await db.prepare("INSERT INTO editorial_campaigns(article_url,title,subject,body,audience) VALUES(?,?,?,?,?) ON CONFLICT(article_url) DO UPDATE SET title=excluded.title,subject=excluded.subject,body=excluded.body,audience=excluded.audience,updated_at=CURRENT_TIMESTAMP").bind(article_url,title,subject,body,audience).run();
+  return json({ok:true,status:'draft'});
  }
  if(path==='/api/import-stockists'&&method==='POST'){
   if(user.role!=='owner')return json({error:'Owner access required.'},403);
