@@ -80,7 +80,7 @@ async function handleRequest(context){
   const {results}=await db.prepare("SELECT p.*,l.business,l.category,l.assigned_to FROM restock_policies p JOIN leads l ON l.id=p.lead_id WHERE ?='owner' OR l.assigned_to=? ORDER BY p.next_check").bind(user.role,user.id).all();
   return json({policies:results});
  }
- const restockMatch=path.match(/^\\/api\\/restock\\/([^/]+)$/);
+ const restockMatch=path.match(/^\/api\/restock\/([^/]+)$/);
  if(restockMatch&&method==='PATCH'){
   const lead=await db.prepare("SELECT id,assigned_to,category FROM leads WHERE id=?").bind(restockMatch[1]).first();
   if(!lead||(user.role!=='owner'&&lead.assigned_to!==user.id))return json({error:'No access to this stockist.'},403);
@@ -107,7 +107,7 @@ async function handleRequest(context){
   const {results}=await db.prepare("SELECT w.* FROM lead_workspace w JOIN leads l ON l.id=w.lead_id WHERE ?='owner' OR l.assigned_to=?").bind(user.role,user.id).all();
   return json({workspace:results});
  }
- const workspaceMatch=path.match(/^\\/api\\/workspace\\/([^/]+)$/);
+ const workspaceMatch=path.match(/^\/api\/workspace\/([^/]+)$/);
  if(workspaceMatch&&method==='PATCH'){
   const id=workspaceMatch[1],lead=await db.prepare("SELECT id,assigned_to FROM leads WHERE id=?").bind(id).first();
   if(!lead||(user.role!=='owner'&&lead.assigned_to!==user.id))return json({error:'No access to this business.'},403);
