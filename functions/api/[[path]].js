@@ -19,7 +19,9 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS editorial_campaigns (article_url TEXT PRIMARY KEY,title TEXT NOT NULL,subject TEXT NOT NULL,body TEXT NOT NULL,audience TEXT NOT NULL DEFAULT 'stockists',status TEXT NOT NULL DEFAULT 'draft',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS substack_cache (id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS grant_opportunities (id TEXT PRIMARY KEY,name TEXT NOT NULL,organization TEXT NOT NULL DEFAULT '',url TEXT NOT NULL UNIQUE,deadline TEXT NOT NULL DEFAULT '',amount TEXT NOT NULL DEFAULT '',geography TEXT NOT NULL DEFAULT '',eligibility TEXT NOT NULL DEFAULT '',fit_score INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'To Review',notes TEXT NOT NULL DEFAULT '',discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
- db.prepare("CREATE TABLE IF NOT EXISTS agent_runs (id TEXT PRIMARY KEY,agent TEXT NOT NULL,status TEXT NOT NULL,findings TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+ db.prepare("CREATE TABLE IF NOT EXISTS agent_runs (id TEXT PRIMARY KEY,agent TEXT NOT NULL,status TEXT NOT NULL,findings TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+ db.prepare("CREATE TABLE IF NOT EXISTS prospect_territories (id TEXT PRIMARY KEY,state TEXT NOT NULL,city TEXT NOT NULL,category TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Queued',last_searched TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(state,city,category))"),
+ db.prepare("CREATE TABLE IF NOT EXISTS prospect_candidates (id TEXT PRIMARY KEY,territory_id TEXT NOT NULL,name TEXT NOT NULL,website TEXT NOT NULL DEFAULT '',city TEXT NOT NULL, state TEXT NOT NULL,category TEXT NOT NULL,source_url TEXT NOT NULL DEFAULT '',fit_notes TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Review',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -96,6 +98,35 @@ async function handleRequest(context){
   const payload={articles:items,feed:target};
   if(items.length)await db.prepare('INSERT INTO substack_cache(id,payload) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=CURRENT_TIMESTAMP').bind(JSON.stringify(payload)).run();
   return json(payload);
+ }
+ if(path==='/api/territories'&&method==='GET'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const [territories,candidates]=await Promise.all([db.prepare('SELECT * FROM prospect_territories ORDER BY created_at DESC').all(),db.prepare("SELECT * FROM prospect_candidates ORDER BY created_at DESC LIMIT 500").all()]);
+  return json({territories:territories.results,candidates:candidates.results});
+ }
+ if(path==='/api/territories'&&method==='POST'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const d=await request.json().catch(()=>({})),state=String(d.state||'').trim().toUpperCase(),city=String(d.city||'').trim(),category=String(d.category||'').trim();
+  if(!/^[A-Z]{2}$/.test(state)||city.length<2||city.length>120||!['bookstores','hotels','museum shops','food shops','gift shops','newsstands'].includes(category))return json({error:'Choose a valid US state, city and store category.'},400);
+  await db.prepare("INSERT INTO prospect_territories(id,state,city,category) VALUES(?,?,?,?) ON CONFLICT(state,city,category) DO NOTHING").bind(random(),state,city,category).run();
+  return json({ok:true});
+ }
+ const territoryMatch=path.match(/^\/api\/territories\/([^/]+)$/);
+ if(territoryMatch&&method==='PATCH'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const d=await request.json().catch(()=>({}));if(!['Queued','Researching','Reviewed'].includes(d.status))return json({error:'Invalid status.'},400);
+  await db.prepare("UPDATE prospect_territories SET status=?,last_searched=CASE WHEN ?='Reviewed' THEN CURRENT_TIMESTAMP ELSE last_searched END WHERE id=?").bind(d.status,d.status,territoryMatch[1]).run();return json({ok:true});
+ }
+ if(path==='/api/prospect-candidates'&&method==='POST'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const d=await request.json().catch(()=>({})),name=String(d.name||'').trim(),website=String(d.website||'').trim(),source=String(d.source_url||'').trim();
+  const t=await db.prepare('SELECT * FROM prospect_territories WHERE id=?').bind(String(d.territory_id||'')).first();
+  if(!t||name.length<2||name.length>180||!/^https:\/\//.test(source)||!/^https:\/\//.test(website))return json({error:'Select a territory and provide verified website and source URLs.'},400);
+  const existing=(await db.prepare("SELECT business,city FROM leads").all()).results.some(l=>l.business.toLowerCase().trim()===name.toLowerCase()&&(!l.city||l.city.toLowerCase().trim()===t.city.toLowerCase()));
+  if(existing)return json({error:'Already in the shared lead database.'},409);
+  const same=await db.prepare("SELECT id FROM prospect_candidates WHERE lower(name)=lower(?) AND lower(city)=lower(?) AND state=?").bind(name,t.city,t.state).first();
+  if(same)return json({error:'Candidate already recorded.'},409);
+  await db.prepare("INSERT INTO prospect_candidates(id,territory_id,name,website,city,state,category,source_url,fit_notes) VALUES(?,?,?,?,?,?,?,?,?)").bind(random(),t.id,name,website,t.city,t.state,t.category,source,String(d.fit_notes||'').slice(0,2000)).run();return json({ok:true});
  }
  if(path==='/api/agent-runs'&&method==='GET'){
   if(user.role!=='owner')return json({error:'Owner access required.'},403);
