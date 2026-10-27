@@ -14,7 +14,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS login_limits (identity TEXT PRIMARY KEY,attempts INTEGER NOT NULL DEFAULT 0,blocked_until INTEGER NOT NULL DEFAULT 0)"),
  db.prepare("CREATE TABLE IF NOT EXISTS lead_workspace (lead_id TEXT PRIMARY KEY,research TEXT NOT NULL DEFAULT '',opportunity TEXT NOT NULL DEFAULT '',draft TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT 'email',score INTEGER NOT NULL DEFAULT 50,archived INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS restock_policies (lead_id TEXT PRIMARY KEY,interval_months INTEGER NOT NULL DEFAULT 3,last_checked TEXT NOT NULL DEFAULT '',next_check TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
- db.prepare("CREATE TABLE IF NOT EXISTS stock_counts (lead_id TEXT NOT NULL,title TEXT NOT NULL,received INTEGER NOT NULL DEFAULT 0,sold INTEGER NOT NULL DEFAULT 0,returned INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(lead_id,title))")
+ db.prepare("CREATE TABLE IF NOT EXISTS stock_counts (lead_id TEXT NOT NULL,title TEXT NOT NULL,received INTEGER NOT NULL DEFAULT 0,sold INTEGER NOT NULL DEFAULT 0,returned INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(lead_id,title))"),
+ db.prepare("CREATE TABLE IF NOT EXISTS historical_stock (lead_id TEXT NOT NULL,issue TEXT NOT NULL,received INTEGER,remaining INTEGER,source TEXT NOT NULL DEFAULT '',source_date TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(lead_id,issue))")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -99,9 +100,22 @@ async function handleRequest(context){
     existingRows.push({id,business:name,city});
     added++;
    }else skipped++;
-   // Historical counts remain in source notes until the publication/issue mix is confirmed.
+   // Preserve source-reported Issue 5 counts separately from live stock.
+   if(raw.inventory&&/issue 5/i.test(tidy(raw.notes))){
+    const qty=Number(raw.inventory.received),rem=Number(raw.inventory.remaining);
+    const received=Number.isInteger(qty)&&qty>=0?qty:null;
+    const remaining=Number.isInteger(rem)&&rem>=0?rem:null;
+    if(received!==null||remaining!==null){
+     await db.prepare("INSERT INTO historical_stock(lead_id,issue,received,remaining,source,source_date) VALUES(?,'Issue 5',?,?,?,?) ON CONFLICT(lead_id,issue) DO UPDATE SET received=excluded.received,remaining=excluded.remaining,source=excluded.source,source_date=excluded.source_date,updated_at=CURRENT_TIMESTAMP").bind(id,received,remaining,tidy(raw.source),tidy(raw.inventory.sentDate)).run();
+     stockAdded++;
+    }
+   }
   }
   return json({ok:true,added,skipped,stockAdded});
+ }
+ if(path==='/api/historical-stock'&&method==='GET'){
+  const {results}=await db.prepare("SELECT h.* FROM historical_stock h JOIN leads l ON l.id=h.lead_id WHERE ?='owner' OR l.assigned_to=?").bind(user.role,user.id).all();
+  return json({history:results});
  }
  if(path==='/api/stock'&&method==='GET'){
   const {results}=await db.prepare("SELECT s.* FROM stock_counts s JOIN leads l ON l.id=s.lead_id WHERE ?='owner' OR l.assigned_to=?").bind(user.role,user.id).all();
