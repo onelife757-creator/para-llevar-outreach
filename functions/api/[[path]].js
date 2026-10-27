@@ -35,6 +35,7 @@ async function userFor(req,db){
 const fields=['business','category','contact','email','phone','website','city','status','notes','due'];
 function bizKey(x){return String(x||'').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'')}
 function bizHost(x){try{return new URL(x).hostname.toLowerCase().replace(/^www\./,'')}catch{return ''}}
+async function defaultStockistAssignee(db,fallback){const alton=await db.prepare("SELECT id FROM members WHERE lower(trim(name))='alton' AND active=1 LIMIT 1").first();return alton?.id||fallback}
 async function crossPipelineMatch(db,name,website,city){
  const key=bizKey(name),host=bizHost(website),place=bizKey(city);
  const found=[];
@@ -289,7 +290,7 @@ async function handleRequest(context){
     id=random();
     const contact=tidy(raw.contact).slice(0,250),email=/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(tidy(raw.email))?tidy(raw.email).slice(0,254):'';
     const notes=('Imported source: '+tidy(raw.source)+'\\n'+tidy(raw.notes)).slice(0,5000);
-    await db.prepare("INSERT INTO leads(id,business,category,contact,email,city,status,notes,assigned_to,created_by) VALUES(?,?,'wholesale',?,?,?,'New',?,?,?)").bind(id,name,contact,email,city,notes,user.id,user.id).run();
+    await db.prepare("INSERT INTO leads(id,business,category,contact,email,city,status,notes,assigned_to,created_by) VALUES(?,?,'wholesale',?,?,?,'New',?,?,?)").bind(id,name,contact,email,city,notes,await defaultStockistAssignee(db,user.id),user.id).run();
     await db.prepare("INSERT INTO events(id,lead_id,member_id,action) VALUES(?,?,?,?)").bind(random(),id,user.id,'imported_from_spreadsheet').run();
     existingRows.push({id,business:name,city});
     added++;
@@ -402,7 +403,7 @@ async function handleRequest(context){
   const d=await request.json().catch(()=>({})),data=validate(d);if(data.error)return json({error:data.error},400);
   const existing=await db.prepare("SELECT id,category FROM leads WHERE LOWER(TRIM(business))=LOWER(TRIM(?)) AND (LOWER(TRIM(city))=LOWER(TRIM(?)) OR TRIM(city)='' OR TRIM(?)='') LIMIT 1").bind(data.business,data.city,data.city).first();
   if(existing)return json({error:'This business is already in the shared lead database. Ask the Owner to review or reassign it rather than creating a second record.'},409);
-  const assigned=user.role==='owner'&&d.assigned_to?String(d.assigned_to):user.id;
+  const assigned=user.role==='owner'&&d.assigned_to?String(d.assigned_to):(String(data.category)==='wholesale'?await defaultStockistAssignee(db,user.id):user.id);
   const permitted=await db.prepare('SELECT id FROM members WHERE id=? AND active=1').bind(assigned).first();if(!permitted)return json({error:'Unknown assignee.'},400);
   const id=random();
   await db.batch([db.prepare("INSERT INTO leads(id,business,category,contact,email,phone,website,city,status,notes,due,last_sent,assigned_to,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(id,...fields.map(f=>data[f]),'',assigned,user.id),db.prepare('INSERT INTO events(id,lead_id,member_id,action) VALUES(?,?,?,?)').bind(random(),id,user.id,'created')]);
