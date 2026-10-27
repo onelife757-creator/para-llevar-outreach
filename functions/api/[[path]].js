@@ -77,6 +77,39 @@ async function handleRequest(context){
   const salt=random();try{await db.prepare("INSERT INTO members(id,name,role,pin_salt,pin_hash) VALUES(?,?,'caller',?,?)").bind(random(),name,salt,await hashPin(pin,salt)).run();}catch{return json({error:'Could not add team member. Check for duplicate names.'},409);}
   return json({ok:true});
  }
+ if(path==='/api/import-stockists'&&method==='POST'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const payload=await request.json().catch(()=>({}));
+  if(!Array.isArray(payload.records)||payload.records.length>20)return json({error:'Upload records in batches of 20 or fewer.'},400);
+  const tidy=x=>String(x||'').trim();
+  const key=x=>tidy(x).toLowerCase().replace(/[^a-z0-9]/g,'').replace(/newsstand/g,'newstand');
+  let added=0,skipped=0,stockAdded=0;
+  for(const raw of payload.records){
+   const name=tidy(raw.business).slice(0,180),city=tidy(raw.city).slice(0,180);
+   if(!name){skipped++;continue}
+   const all=await db.prepare("SELECT id,business,city FROM leads WHERE category='wholesale'").all();
+   const matched=all.results.find(x=>key(x.business)===key(name)&&(key(x.city)===key(city)||!key(x.city)||!key(city)));
+   let id=matched?.id;
+   if(!id){
+    id=random();
+    const contact=tidy(raw.contact).slice(0,250),email=/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(tidy(raw.email))?tidy(raw.email).slice(0,254):'';
+    const notes=('Imported source: '+tidy(raw.source)+'\\n'+tidy(raw.notes)).slice(0,5000);
+    await db.prepare("INSERT INTO leads(id,business,category,contact,email,city,status,notes,assigned_to,created_by) VALUES(?,?,'wholesale',?,?,?,'New',?,?,?)").bind(id,name,contact,email,city,notes,user.id,user.id).run();
+    await db.prepare("INSERT INTO events(id,lead_id,member_id,action) VALUES(?,?,?,?)").bind(random(),id,user.id,'imported_from_spreadsheet').run();
+    added++;
+   }else skipped++;
+   const inv=raw.inventory||{};
+   if(inv.received!==undefined&&inv.received!==null&&!matched){
+    const received=Number(inv.received),sold=Number(inv.sold??0),remaining=Number(inv.remaining);
+    if(Number.isInteger(received)&&received>=0&&Number.isInteger(sold)&&sold>=0&&sold<=received){
+     const returned=Number.isInteger(remaining)&&remaining>=0&&remaining<=received-sold?received-sold-remaining:0;
+     await db.prepare("INSERT OR IGNORE INTO stock_counts(lead_id,title,received,sold,returned) VALUES(?,'PARA LLEVAR Magazine',?,?,?)").bind(id,received,sold,returned).run();
+     stockAdded++;
+    }
+   }
+  }
+  return json({ok:true,added,skipped,stockAdded});
+ }
  if(path==='/api/stock'&&method==='GET'){
   const {results}=await db.prepare("SELECT s.* FROM stock_counts s JOIN leads l ON l.id=s.lead_id WHERE ?='owner' OR l.assigned_to=?").bind(user.role,user.id).all();
   return json({stock:results});
