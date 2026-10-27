@@ -13,7 +13,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY,lead_id TEXT NOT NULL,member_id TEXT NOT NULL,action TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS login_limits (identity TEXT PRIMARY KEY,attempts INTEGER NOT NULL DEFAULT 0,blocked_until INTEGER NOT NULL DEFAULT 0)"),
  db.prepare("CREATE TABLE IF NOT EXISTS lead_workspace (lead_id TEXT PRIMARY KEY,research TEXT NOT NULL DEFAULT '',opportunity TEXT NOT NULL DEFAULT '',draft TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT 'email',score INTEGER NOT NULL DEFAULT 50,archived INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
- db.prepare("CREATE TABLE IF NOT EXISTS restock_policies (lead_id TEXT PRIMARY KEY,interval_months INTEGER NOT NULL DEFAULT 3,last_checked TEXT NOT NULL DEFAULT '',next_check TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+ db.prepare("CREATE TABLE IF NOT EXISTS restock_policies (lead_id TEXT PRIMARY KEY,interval_months INTEGER NOT NULL DEFAULT 3,last_checked TEXT NOT NULL DEFAULT '',next_check TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+ db.prepare("CREATE TABLE IF NOT EXISTS stock_counts (lead_id TEXT NOT NULL,title TEXT NOT NULL,received INTEGER NOT NULL DEFAULT 0,sold INTEGER NOT NULL DEFAULT 0,returned INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(lead_id,title))")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -75,6 +76,26 @@ async function handleRequest(context){
   if(name.length<2||name.length>80||!/^[0-9]{4,8}$/.test(pin))return json({error:'Name and 4 to 8 digit PIN required.'},400);
   const salt=random();try{await db.prepare("INSERT INTO members(id,name,role,pin_salt,pin_hash) VALUES(?,?,'caller',?,?)").bind(random(),name,salt,await hashPin(pin,salt)).run();}catch{return json({error:'Could not add team member. Check for duplicate names.'},409);}
   return json({ok:true});
+ }
+ if(path==='/api/stock'&&method==='GET'){
+  const {results}=await db.prepare("SELECT s.* FROM stock_counts s JOIN leads l ON l.id=s.lead_id WHERE ?='owner' OR l.assigned_to=?").bind(user.role,user.id).all();
+  return json({stock:results});
+ }
+ const stockMatch=path.match(/^\/api\/stock\/([^/]+)$/);
+ if(stockMatch&&method==='PATCH'){
+  const lead=await db.prepare("SELECT id,assigned_to,category FROM leads WHERE id=?").bind(stockMatch[1]).first();
+  if(!lead||(user.role!=='owner'&&lead.assigned_to!==user.id))return json({error:'No access to this stockist.'},403);
+  if(lead.category!=='wholesale')return json({error:'Only wholesale stockists can hold inventory.'},400);
+  const d=await request.json().catch(()=>({}));
+  if(!['PARA LLEVAR Magazine','Check Please'].includes(d.title))return json({error:'Choose a valid publication.'},400);
+  const nums=['received','sold','returned'].map(k=>Number(d[k]));
+  if(nums.some(n=>!Number.isInteger(n)||n<0||n>1000000))return json({error:'Enter whole numbers of zero or greater.'},400);
+  if(nums[1]+nums[2]>nums[0])return json({error:'Sold and returned cannot exceed copies received.'},400);
+  await db.batch([
+   db.prepare("INSERT INTO stock_counts(lead_id,title,received,sold,returned) VALUES(?,?,?,?,?) ON CONFLICT(lead_id,title) DO UPDATE SET received=excluded.received,sold=excluded.sold,returned=excluded.returned,updated_at=CURRENT_TIMESTAMP").bind(lead.id,d.title,...nums),
+   db.prepare("INSERT INTO events(id,lead_id,member_id,action) VALUES(?,?,?,?)").bind(random(),lead.id,user.id,'inventory_updated')
+  ]);
+  return json({ok:true,remaining:nums[0]-nums[1]-nums[2]});
  }
  if(path==='/api/restock'&&method==='GET'){
   const {results}=await db.prepare("SELECT p.*,l.business,l.category,l.assigned_to FROM restock_policies p JOIN leads l ON l.id=p.lead_id WHERE ?='owner' OR l.assigned_to=? ORDER BY p.next_check").bind(user.role,user.id).all();
