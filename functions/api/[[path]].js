@@ -78,6 +78,11 @@ async function handleRequest(context){
   const q=user.role==='owner'?db.prepare('SELECT * FROM leads ORDER BY updated_at DESC'):db.prepare('SELECT * FROM leads WHERE assigned_to=? ORDER BY updated_at DESC').bind(user.id);
   const {results}=await q.all();return json({leads:results.map(mapLead)});
  }
+ if(path==='/api/claimed'&&method==='GET'){
+  if(user.role==='owner')return json({claimed:[]});
+  const {results}=await db.prepare("SELECT l.business,l.city,l.category FROM leads l WHERE l.assigned_to<>? ORDER BY l.business COLLATE NOCASE").bind(user.id).all();
+  return json({claimed:results});
+ }
  if(path==='/api/leads'&&method==='POST'){
   const d=await request.json().catch(()=>({})),data=validate(d);if(data.error)return json({error:data.error},400);
   const existing=await db.prepare("SELECT id,category FROM leads WHERE LOWER(TRIM(business))=LOWER(TRIM(?)) AND (LOWER(TRIM(city))=LOWER(TRIM(?)) OR TRIM(city)='' OR TRIM(?)='') LIMIT 1").bind(data.business,data.city,data.city).first();
