@@ -33,6 +33,10 @@ async function handleRequest(context){
   if(!created.meta?.changes)return json({error:'Already configured.'},409);
   return json({ok:true});
  }
+ if(path==='/api/login-accounts'&&method==='GET'){
+  const rows=await db.prepare("SELECT name FROM members WHERE active=1 ORDER BY name").all();
+  return json({accounts:rows.results.map(row=>row.name)});
+ }
  if(path==='/api/login'&&method==='POST'){
   const data=await request.json().catch(()=>({})),name=String(data.name||'').trim(),pin=String(data.pin||'');
   const member=await db.prepare('SELECT * FROM members WHERE name=? COLLATE NOCASE AND active=1').bind(name).first();
