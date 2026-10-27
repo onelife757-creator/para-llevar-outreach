@@ -10,7 +10,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,member_id TEXT NOT NULL,expires_at TEXT NOT NULL)"),
  db.prepare("CREATE TABLE IF NOT EXISTS leads (id TEXT PRIMARY KEY,business TEXT NOT NULL,category TEXT NOT NULL CHECK(category IN ('wholesale','advertising','retail')),contact TEXT NOT NULL DEFAULT '',email TEXT NOT NULL DEFAULT '',phone TEXT NOT NULL DEFAULT '',website TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'New',notes TEXT NOT NULL DEFAULT '',due TEXT NOT NULL DEFAULT '',last_sent TEXT NOT NULL DEFAULT '',assigned_to TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE INDEX IF NOT EXISTS idx_pl_leads_assigned ON leads(assigned_to,updated_at)"),
- db.prepare("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY,lead_id TEXT NOT NULL,member_id TEXT NOT NULL,action TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+ db.prepare("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY,lead_id TEXT NOT NULL,member_id TEXT NOT NULL,action TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+ db.prepare("CREATE TABLE IF NOT EXISTS login_limits (identity TEXT PRIMARY KEY,attempts INTEGER NOT NULL DEFAULT 0,blocked_until INTEGER NOT NULL DEFAULT 0)")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -39,8 +40,19 @@ async function handleRequest(context){
  }
  if(path==='/api/login'&&method==='POST'){
   const data=await request.json().catch(()=>({})),name=String(data.name||'').trim(),pin=String(data.pin||'');
+  const remoteIp=request.headers.get('CF-Connecting-IP')||'unknown';
+  const identity=await digest(remoteIp+'|'+name.toLowerCase());
+  const now=Date.now();
+  const limit=await db.prepare('SELECT attempts,blocked_until FROM login_limits WHERE identity=?').bind(identity).first();
+  if(limit&&limit.blocked_until>now)return json({error:'Too many sign-in attempts. Try again in 15 minutes.'},429);
   const member=await db.prepare('SELECT * FROM members WHERE name=? COLLATE NOCASE AND active=1').bind(name).first();
-  if(!member||!pin||await hashPin(pin,member.pin_salt)!==member.pin_hash)return json({error:'Invalid account or PIN.'},401);
+  const valid=!!member&&!!pin&&await hashPin(pin,member.pin_salt)===member.pin_hash;
+  if(!valid){
+   const attempts=(limit?.blocked_until&&limit.blocked_until<=now?0:limit?.attempts||0)+1;
+   await db.prepare('INSERT INTO login_limits(identity,attempts,blocked_until) VALUES(?,?,?) ON CONFLICT(identity) DO UPDATE SET attempts=excluded.attempts,blocked_until=excluded.blocked_until').bind(identity,attempts,attempts>=5?now+15*60*1000:0).run();
+   return json({error:attempts>=5?'Too many sign-in attempts. Try again in 15 minutes.':'Invalid account or PIN.'},attempts>=5?429:401);
+  }
+  await db.prepare('DELETE FROM login_limits WHERE identity=?').bind(identity).run();
   const token=random()+random(),expiry=new Date(Date.now()+7*86400000).toISOString();await db.prepare('INSERT INTO sessions(token_hash,member_id,expires_at) VALUES(?,?,?)').bind(await digest(token),member.id,expiry).run();
   return new Response(JSON.stringify({ok:true,user:{id:member.id,name:member.name,role:member.role}}),{headers:{'content-type':'application/json','cache-control':'no-store','set-cookie':cookie(token,7*86400)}});
  }
