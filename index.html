@@ -9,7 +9,7 @@
 'use strict';
 const $=q=>document.querySelector(q),escape=v=>String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const prices=[{name:'PARA LLEVAR Magazine',type:'Publication',wholesale:14,retail:26},{name:'Check Please',type:'Publication',wholesale:12,retail:24},{name:'Full-page advertisement',type:'Advertising',price:800},{name:'Two full-page advertisements',type:'Advertising',price:1600},{name:'Two-page spread',type:'Advertising',price:2000},{name:'Contributor-page thank you',type:'Advertising add-on',price:200},{name:"Editor's-letter integration",type:'Advertising add-on',price:400}];
-const categories={wholesale:'Wholesale / Stockist',advertising:'Advertising / Brand',retail:'Retail'};let leads=[],me=null,members=[];const api=async(path,opts={})=>{const r=await fetch('/api/'+path,{...opts,headers:{'content-type':'application/json'}});const data=await r.json();if(!r.ok)throw Error(data.error||'Request failed.');return data};
+const categories={wholesale:'Wholesale / Stockist',advertising:'Advertising / Brand',retail:'Retail'};let leads=[],me=null,members=[];const api=async(path,opts={})=>{const r=await fetch('/api/'+path,{...opts,headers:{'content-type':'application/json'}});const raw=await r.text();let data;try{data=JSON.parse(raw)}catch{throw Error('Cloudflare returned an unexpected response ('+r.status+'). Check the latest deployment and Functions logs.')}if(!r.ok)throw Error(data.error+(data.detail?' '+data.detail:''));return data};
 let page='dashboard',search='',selected=null;
 const save=async()=>{throw Error('Use the shared database API instead of browser storage.')};
 const date=()=>new Date().toISOString().slice(0,10);
