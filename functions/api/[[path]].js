@@ -31,6 +31,21 @@ async function userFor(req,db){
  return db.prepare("SELECT m.id,m.name,m.role FROM sessions s JOIN members m ON m.id=s.member_id WHERE s.token_hash=? AND s.expires_at>? AND m.active=1").bind(await digest(token),new Date().toISOString()).first();
 }
 const fields=['business','category','contact','email','phone','website','city','status','notes','due'];
+function bizKey(x){return String(x||'').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]/g,'')}
+function bizHost(x){try{return new URL(x).hostname.toLowerCase().replace(/^www\./,'')}catch{return ''}}
+async function crossPipelineMatch(db,name,website,city){
+ const key=bizKey(name),host=bizHost(website),place=bizKey(city);
+ const found=[];
+ const [leads,stockists,partners]=await Promise.all([
+ db.prepare('SELECT business name,website,city FROM leads').all(),
+ db.prepare('SELECT name,website,city FROM prospect_candidates').all(),
+ db.prepare('SELECT name,website,city FROM partnerships').all()
+ ]);
+ for(const [source,rows] of [['existing lead',leads.results],['stockist prospect',stockists.results],['partnership prospect',partners.results]]){
+  for(const r of rows){const otherHost=bizHost(r.website);if(host&&otherHost&&host===otherHost||key&&key===bizKey(r.name)&&(!place||!bizKey(r.city)||place===bizKey(r.city)))found.push({source,name:r.name,city:r.city})}
+ }
+ return found;
+}
 async function handleRequest(context){
  const {request,env}=context,db=env.PL_DB,url=new URL(request.url),path=url.pathname,method=request.method;
  if(!db)return json({error:'D1 is not connected. Add the PL_DB binding in Cloudflare Pages settings.'},503);
@@ -124,10 +139,7 @@ async function handleRequest(context){
   const d=await request.json().catch(()=>({})),name=String(d.name||'').trim(),website=String(d.website||'').trim(),source=String(d.source_url||'').trim();
   const t=await db.prepare('SELECT * FROM prospect_territories WHERE id=?').bind(String(d.territory_id||'')).first();
   if(!t||name.length<2||name.length>180||!/^https:\/\//.test(source)||!/^https:\/\//.test(website))return json({error:'Select a territory and provide verified website and source URLs.'},400);
-  const existing=(await db.prepare("SELECT business,city FROM leads").all()).results.some(l=>l.business.toLowerCase().trim()===name.toLowerCase()&&(!l.city||l.city.toLowerCase().trim()===t.city.toLowerCase()));
-  if(existing)return json({error:'Already in the shared lead database.'},409);
-  const same=await db.prepare("SELECT id FROM prospect_candidates WHERE lower(name)=lower(?) AND lower(city)=lower(?) AND state=?").bind(name,t.city,t.state).first();
-  if(same)return json({error:'Candidate already recorded.'},409);
+  const duplicates=await crossPipelineMatch(db,name,website,t.city);if(duplicates.length)return json({error:'Already tracked as '+duplicates[0].source+': '+duplicates[0].name+'. Do not create a second record.',existing:duplicates},409);
   const id=random();await db.prepare("INSERT INTO prospect_candidates(id,territory_id,name,website,city,state,category,source_url,fit_notes) VALUES(?,?,?,?,?,?,?,?,?)").bind(id,t.id,name,website,t.city,t.state,t.category,source,String(d.fit_notes||'').slice(0,2000)).run();
   const photo=String(d.photo_url||''),contact=String(d.contact_url||''),email=String(d.contact_email||''),buyer=String(d.buyer_name||''),products=String(d.products||''),pitch=String(d.pitch||''),score=Math.max(0,Math.min(100,Math.round(Number(d.fit_score)||0)));
   if([photo,contact].every(x=>!x||/^https:\/\//.test(x))&&(!email||/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))await db.prepare("INSERT INTO candidate_research(candidate_id,photo_url,contact_url,contact_email,buyer_name,products,pitch,fit_score) VALUES(?,?,?,?,?,?,?,?)").bind(id,photo.slice(0,1200),contact.slice(0,1200),email.slice(0,250),buyer.slice(0,200),products.slice(0,3000),pitch.slice(0,4000),score).run();
@@ -141,7 +153,7 @@ async function handleRequest(context){
  if(user.role!=='owner')return json({error:'Owner access required.'},403);
  const d=await request.json().catch(()=>({})),name=String(d.name||'').trim(),website=String(d.website||'').trim(),category=String(d.category||'').trim();
  if(!name||name.length>180||!/^https:\/\//.test(website)||!['Brands','Restaurants & Chefs','Hotels','Events','Cultural Organizations','Media','Other'].includes(category))return json({error:'Enter a valid name, category and official HTTPS website.'},400);
- const existing=await db.prepare('SELECT id FROM partnerships WHERE lower(name)=lower(?) AND website=?').bind(name,website).first();if(existing)return json({error:'Already in the partnership pipeline.'},409);
+ const duplicates=await crossPipelineMatch(db,name,website,d.city);if(duplicates.length)return json({error:'Already tracked as '+duplicates[0].source+': '+duplicates[0].name+'. Review the existing business instead of creating a duplicate.',existing:duplicates},409);
  const fields=['contact','contact_url','city','collaboration','value_prop','source_url','notes'].map(k=>String(d[k]||'').trim().slice(0,2000));
  if([fields[1],fields[5]].some(x=>x&&!/^https:\/\//.test(x)))return json({error:'Contact and source links must use HTTPS.'},400);
  await db.prepare('INSERT INTO partnerships(id,name,category,website,contact,contact_url,city,collaboration,value_prop,source_url,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(random(),name,category,website,...fields).run();return json({ok:true});
