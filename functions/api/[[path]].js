@@ -98,15 +98,7 @@ async function handleRequest(context){
     await db.prepare("INSERT INTO events(id,lead_id,member_id,action) VALUES(?,?,?,?)").bind(random(),id,user.id,'imported_from_spreadsheet').run();
     added++;
    }else skipped++;
-   const inv=raw.inventory||{};
-   if(inv.received!==undefined&&inv.received!==null&&!matched){
-    const received=Number(inv.received),sold=Number(inv.sold??0),remaining=Number(inv.remaining);
-    if(Number.isInteger(received)&&received>=0&&Number.isInteger(sold)&&sold>=0&&sold<=received){
-     const returned=Number.isInteger(remaining)&&remaining>=0&&remaining<=received-sold?received-sold-remaining:0;
-     await db.prepare("INSERT OR IGNORE INTO stock_counts(lead_id,title,received,sold,returned) VALUES(?,'PARA LLEVAR Magazine',?,?,?)").bind(id,received,sold,returned).run();
-     stockAdded++;
-    }
-   }
+   // Historical counts remain in source notes until the publication/issue mix is confirmed.
   }
   return json({ok:true,added,skipped,stockAdded});
  }
