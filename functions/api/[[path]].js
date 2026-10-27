@@ -18,7 +18,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS historical_stock (lead_id TEXT NOT NULL,issue TEXT NOT NULL,received INTEGER,remaining INTEGER,source TEXT NOT NULL DEFAULT '',source_date TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(lead_id,issue))"),
  db.prepare("CREATE TABLE IF NOT EXISTS editorial_campaigns (article_url TEXT PRIMARY KEY,title TEXT NOT NULL,subject TEXT NOT NULL,body TEXT NOT NULL,audience TEXT NOT NULL DEFAULT 'stockists',status TEXT NOT NULL DEFAULT 'draft',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS substack_cache (id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
- db.prepare("CREATE TABLE IF NOT EXISTS grant_opportunities (id TEXT PRIMARY KEY,name TEXT NOT NULL,organization TEXT NOT NULL DEFAULT '',url TEXT NOT NULL UNIQUE,deadline TEXT NOT NULL DEFAULT '',amount TEXT NOT NULL DEFAULT '',geography TEXT NOT NULL DEFAULT '',eligibility TEXT NOT NULL DEFAULT '',fit_score INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'To Review',notes TEXT NOT NULL DEFAULT '',discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+ db.prepare("CREATE TABLE IF NOT EXISTS grant_opportunities (id TEXT PRIMARY KEY,name TEXT NOT NULL,organization TEXT NOT NULL DEFAULT '',url TEXT NOT NULL UNIQUE,deadline TEXT NOT NULL DEFAULT '',amount TEXT NOT NULL DEFAULT '',geography TEXT NOT NULL DEFAULT '',eligibility TEXT NOT NULL DEFAULT '',fit_score INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'To Review',notes TEXT NOT NULL DEFAULT '',discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+ db.prepare("CREATE TABLE IF NOT EXISTS agent_runs (id TEXT PRIMARY KEY,agent TEXT NOT NULL,status TEXT NOT NULL,findings TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -95,6 +96,21 @@ async function handleRequest(context){
   const payload={articles:items,feed:target};
   if(items.length)await db.prepare('INSERT INTO substack_cache(id,payload) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=CURRENT_TIMESTAMP').bind(JSON.stringify(payload)).run();
   return json(payload);
+ }
+ if(path==='/api/agent-runs'&&method==='GET'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const {results}=await db.prepare('SELECT id,agent,status,findings,created_at FROM agent_runs ORDER BY created_at DESC LIMIT 100').all();
+  return json({runs:results});
+ }
+ if(path==='/api/agent-runs'&&method==='POST'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const d=await request.json().catch(()=>({}));
+  if(!['restock','stockist','grants'].includes(d.agent))return json({error:'Unknown agent.'},400);
+  if(d.agent!=='restock')return json({error:'External research is not configured for this agent yet.'},409);
+  const {results}=await db.prepare("SELECT l.id,l.business,l.city,p.next_check,p.interval_months,p.last_checked FROM restock_policies p JOIN leads l ON l.id=p.lead_id LEFT JOIN lead_workspace w ON w.lead_id=l.id WHERE l.category='wholesale' AND COALESCE(w.archived,0)=0 AND p.next_check<>'' AND p.next_check<=date('now') ORDER BY p.next_check LIMIT 200").all();
+  const findings=results.map(r=>({lead_id:r.id,business:r.business,city:r.city,due:r.next_check,months:r.interval_months,message:'Review stock history and confirm remaining copies before proposing a restock.'}));
+  const id=random();await db.prepare('INSERT INTO agent_runs(id,agent,status,findings,created_by) VALUES(?,?,?,?,?)').bind(id,'restock','review',JSON.stringify(findings),user.id).run();
+  return json({ok:true,id,count:findings.length,findings});
  }
  if(path==='/api/grants'&&method==='GET'){
   if(user.role!=='owner')return json({error:'Owner access required.'},403);
