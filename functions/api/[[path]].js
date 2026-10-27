@@ -90,7 +90,7 @@ async function handleRequest(context){
   const xml=await response.text();
   const decode=x=>String(x||'').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,'$1').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/<[^>]*>/g,'').trim();
   const get=(item,tag)=>{const match=item.match(new RegExp('<'+tag+'(?:\\s[^>]*)?>([\\s\\S]*?)<\\/'+tag+'>','i'));return decode(match?.[1]||'')};
-  const items=(xml.match(/<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi)||[]).slice(0,30).map(item=>({title:get(item,'title'),url:get(item,'link'),published:get(item,'pubDate'),summary:get(item,'description').slice(0,500)})).filter(item=>item.title&&/^https:\/\/(parallevarmagazine\.substack\.com|substack\.com)\//.test(item.url));
+  const items=(xml.match(/<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi)||[]).slice(0,30).map(item=>({title:get(item,'title'),url:get(item,'link'),published:get(item,'pubDate'),summary:get(item,'description').slice(0,500),image:(item.match(/<enclosure\b[^>]*url=["']([^"']+)["'][^>]*>/i)?.[1]||item.match(/<media:content\b[^>]*url=["']([^"']+)["'][^>]*>/i)?.[1]||item.match(/<img\b[^>]*src=["']([^"']+)["']/i)?.[1]||'').replace(/&amp;/g,'&')})).filter(item=>item.title&&/^https:\/\/(parallevarmagazine\.substack\.com|substack\.com)\//.test(item.url));
   const payload={articles:items,feed:target};
   if(items.length)await db.prepare('INSERT INTO substack_cache(id,payload) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=CURRENT_TIMESTAMP').bind(JSON.stringify(payload)).run();
   return json(payload);
