@@ -23,7 +23,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS prospect_territories (id TEXT PRIMARY KEY,state TEXT NOT NULL,city TEXT NOT NULL,category TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Queued',last_searched TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(state,city,category))"),
  db.prepare("CREATE TABLE IF NOT EXISTS prospect_candidates (id TEXT PRIMARY KEY,territory_id TEXT NOT NULL,name TEXT NOT NULL,website TEXT NOT NULL DEFAULT '',city TEXT NOT NULL, state TEXT NOT NULL,category TEXT NOT NULL,source_url TEXT NOT NULL DEFAULT '',fit_notes TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Review',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS candidate_research (candidate_id TEXT PRIMARY KEY,photo_url TEXT NOT NULL DEFAULT '',contact_url TEXT NOT NULL DEFAULT '',contact_email TEXT NOT NULL DEFAULT '',buyer_name TEXT NOT NULL DEFAULT '',products TEXT NOT NULL DEFAULT '',pitch TEXT NOT NULL DEFAULT '',fit_score INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
- db.prepare("CREATE TABLE IF NOT EXISTS partnerships (id TEXT PRIMARY KEY,name TEXT NOT NULL,category TEXT NOT NULL,website TEXT NOT NULL,contact TEXT NOT NULL DEFAULT '',contact_url TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',collaboration TEXT NOT NULL DEFAULT '',value_prop TEXT NOT NULL DEFAULT '',source_url TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Research',notes TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+ db.prepare("CREATE TABLE IF NOT EXISTS partnerships (id TEXT PRIMARY KEY,name TEXT NOT NULL,category TEXT NOT NULL,website TEXT NOT NULL,contact TEXT NOT NULL DEFAULT '',contact_url TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',collaboration TEXT NOT NULL DEFAULT '',value_prop TEXT NOT NULL DEFAULT '',source_url TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Research',notes TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+ db.prepare("CREATE TABLE IF NOT EXISTS offer_settings (id TEXT PRIMARY KEY,answers TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -99,6 +100,25 @@ async function handleRequest(context){
   const d=await request.json().catch(()=>({})),name=String(d.name||'').trim(),pin=String(d.pin||'');
   if(name.length<2||name.length>80||!/^[0-9]{4,8}$/.test(pin))return json({error:'Name and 4 to 8 digit PIN required.'},400);
   const salt=random();try{await db.prepare("INSERT INTO members(id,name,role,pin_salt,pin_hash) VALUES(?,?,'caller',?,?)").bind(random(),name,salt,await hashPin(pin,salt)).run();}catch{return json({error:'Could not add team member. Check for duplicate names.'},409);}
+  return json({ok:true});
+ }
+ if(path==='/api/offer-settings'&&method==='GET'){
+  const r=await db.prepare("SELECT answers,updated_at FROM offer_settings WHERE id='main'").first();
+  return json({answers:r?JSON.parse(r.answers):{},updated_at:r?.updated_at||null});
+ }
+ if(path==='/api/offer-settings'&&method==='POST'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const d=await request.json().catch(()=>({}));
+  const allowed=['minimum_order','shipping','order_method','payment_terms','lead_time','magazine_summary','check_please_summary','wholesale_contacts','ad_deadlines','ad_deliverables','editorial_policy','partnership_policy','digital_options','visual_assets'];
+  const answers=Object.fromEntries(allowed.map(k=>[k,String(d[k]||'').slice(0,1500)]));
+  await db.prepare("INSERT INTO offer_settings(id,answers) VALUES('main',?) ON CONFLICT(id) DO UPDATE SET answers=excluded.answers,updated_at=CURRENT_TIMESTAMP").bind(JSON.stringify(answers)).run();
+  return json({ok:true});
+ }
+ if(path==='/api/team-role'&&method==='POST'){
+  if(user.role!=='owner')return json({error:'Only an existing Owner may grant access.'},403);
+  const d=await request.json().catch(()=>({})),m=await db.prepare('SELECT id,name,role FROM members WHERE id=? AND active=1').bind(String(d.member_id||'')).first();
+  if(!m||m.name.trim().toLowerCase()!=='alton'||m.role!=='caller')return json({error:'Only the existing Alton caller account can be promoted using this control.'},400);
+  await db.prepare("UPDATE members SET role='owner' WHERE id=?").bind(m.id).run();
   return json({ok:true});
  }
  if(path==='/api/substack-feed'&&method==='GET'){
