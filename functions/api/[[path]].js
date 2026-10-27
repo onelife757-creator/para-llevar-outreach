@@ -11,7 +11,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS leads (id TEXT PRIMARY KEY,business TEXT NOT NULL,category TEXT NOT NULL CHECK(category IN ('wholesale','advertising','retail')),contact TEXT NOT NULL DEFAULT '',email TEXT NOT NULL DEFAULT '',phone TEXT NOT NULL DEFAULT '',website TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'New',notes TEXT NOT NULL DEFAULT '',due TEXT NOT NULL DEFAULT '',last_sent TEXT NOT NULL DEFAULT '',assigned_to TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE INDEX IF NOT EXISTS idx_pl_leads_assigned ON leads(assigned_to,updated_at)"),
  db.prepare("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY,lead_id TEXT NOT NULL,member_id TEXT NOT NULL,action TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
- db.prepare("CREATE TABLE IF NOT EXISTS login_limits (identity TEXT PRIMARY KEY,attempts INTEGER NOT NULL DEFAULT 0,blocked_until INTEGER NOT NULL DEFAULT 0)")
+ db.prepare("CREATE TABLE IF NOT EXISTS login_limits (identity TEXT PRIMARY KEY,attempts INTEGER NOT NULL DEFAULT 0,blocked_until INTEGER NOT NULL DEFAULT 0)"),
+ db.prepare("CREATE TABLE IF NOT EXISTS lead_workspace (lead_id TEXT PRIMARY KEY,research TEXT NOT NULL DEFAULT '',opportunity TEXT NOT NULL DEFAULT '',draft TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT 'email',score INTEGER NOT NULL DEFAULT 50,archived INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -73,6 +74,37 @@ async function handleRequest(context){
   if(name.length<2||name.length>80||!/^[0-9]{4,8}$/.test(pin))return json({error:'Name and 4 to 8 digit PIN required.'},400);
   const salt=random();try{await db.prepare("INSERT INTO members(id,name,role,pin_salt,pin_hash) VALUES(?,?,'caller',?,?)").bind(random(),name,salt,await hashPin(pin,salt)).run();}catch{return json({error:'Could not add team member. Check for duplicate names.'},409);}
   return json({ok:true});
+ }
+ if(path==='/api/workspace'&&method==='GET'){
+  const {results}=await db.prepare("SELECT w.* FROM lead_workspace w JOIN leads l ON l.id=w.lead_id WHERE ?='owner' OR l.assigned_to=?").bind(user.role,user.id).all();
+  return json({workspace:results});
+ }
+ const workspaceMatch=path.match(/^\\/api\\/workspace\\/([^/]+)$/);
+ if(workspaceMatch&&method==='PATCH'){
+  const id=workspaceMatch[1],lead=await db.prepare("SELECT id,assigned_to FROM leads WHERE id=?").bind(id).first();
+  if(!lead||(user.role!=='owner'&&lead.assigned_to!==user.id))return json({error:'No access to this business.'},403);
+  const d=await request.json().catch(()=>({}));
+  const current=await db.prepare("SELECT * FROM lead_workspace WHERE lead_id=?").bind(id).first()||{};
+  const research=String(d.research??current.research??'').slice(0,15000);
+  const opportunity=String(d.opportunity??current.opportunity??'').slice(0,8000);
+  const draft=String(d.draft??current.draft??'').slice(0,12000);
+  const channel=['email','dm','phone'].includes(d.channel)?d.channel:(current.channel||'email');
+  const score=Math.max(1,Math.min(100,Number.isFinite(Number(d.score))?Math.round(Number(d.score)):(current.score||50)));
+  if(d.archived!==undefined&&user.role!=='owner')return json({error:'Only the Owner can archive or restore businesses.'},403);
+  const archived=user.role==='owner'&&d.archived!==undefined?(d.archived?1:0):(current.archived||0);
+  await db.batch([
+   db.prepare("INSERT INTO lead_workspace(lead_id,research,opportunity,draft,channel,score,archived) VALUES(?,?,?,?,?,?,?) ON CONFLICT(lead_id) DO UPDATE SET research=excluded.research,opportunity=excluded.opportunity,draft=excluded.draft,channel=excluded.channel,score=excluded.score,archived=excluded.archived,updated_at=CURRENT_TIMESTAMP").bind(id,research,opportunity,draft,channel,score,archived),
+   db.prepare("INSERT INTO events(id,lead_id,member_id,action) VALUES(?,?,?,?)").bind(random(),id,user.id,d.archived!==undefined?(archived?'archived':'restored'):'workspace_updated')
+  ]);
+  return json({ok:true});
+ }
+ if(path==='/api/activity'&&method==='GET'){
+  const leadId=url.searchParams.get('leadId');
+  if(!leadId)return json({error:'Lead ID required.'},400);
+  const lead=await db.prepare('SELECT assigned_to FROM leads WHERE id=?').bind(leadId).first();
+  if(!lead||(user.role!=='owner'&&lead.assigned_to!==user.id))return json({error:'No access.'},403);
+  const {results}=await db.prepare('SELECT e.action,e.created_at,m.name AS actor FROM events e LEFT JOIN members m ON m.id=e.member_id WHERE e.lead_id=? ORDER BY e.created_at DESC LIMIT 100').bind(leadId).all();
+  return json({activity:results});
  }
  if(path==='/api/leads'&&method==='GET'){
   const q=user.role==='owner'?db.prepare('SELECT * FROM leads ORDER BY updated_at DESC'):db.prepare('SELECT * FROM leads WHERE assigned_to=? ORDER BY updated_at DESC').bind(user.id);
