@@ -2,7 +2,7 @@ const enc=new TextEncoder();
 const json=(data,status=200)=>Response.json(data,{status,headers:{'cache-control':'no-store'}});
 const hex=a=>Array.from(new Uint8Array(a),b=>b.toString(16).padStart(2,'0')).join('');
 const digest=async s=>hex(await crypto.subtle.digest('SHA-256',enc.encode(s)));
-const hashPin=async(pin,salt)=>hex(await crypto.subtle.deriveBits({name:'PBKDF2',salt:enc.encode(salt),iterations:180000,hash:'SHA-256'},await crypto.subtle.importKey('raw',enc.encode(pin),'PBKDF2',false,['deriveBits']),256));
+const hashPin=async(pin,salt)=>hex(await crypto.subtle.deriveBits({name:'PBKDF2',salt:enc.encode(salt),iterations:100000,hash:'SHA-256'},await crypto.subtle.importKey('raw',enc.encode(pin),'PBKDF2',false,['deriveBits']),256));
 const random=()=>crypto.randomUUID();
 const cookie=(token,maxAge)=>'__Host-pl_session='+token+'; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age='+maxAge;
 async function tables(db){await db.batch([
