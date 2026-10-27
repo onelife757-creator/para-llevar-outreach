@@ -18,7 +18,7 @@ async function userFor(req,db){
  return db.prepare("SELECT m.id,m.name,m.role FROM sessions s JOIN members m ON m.id=s.member_id WHERE s.token_hash=? AND s.expires_at>? AND m.active=1").bind(await digest(token),new Date().toISOString()).first();
 }
 const fields=['business','category','contact','email','phone','website','city','status','notes','due'];
-export async function onRequest(context){
+async function handleRequest(context){
  const {request,env}=context,db=env.PL_DB,url=new URL(request.url),path=url.pathname,method=request.method;
  if(!db)return json({error:'D1 is not connected. Add the PL_DB binding in Cloudflare Pages settings.'},503);
  if(!['GET','HEAD'].includes(method)&&new URL(request.url).origin!==request.headers.get('origin'))return json({error:'Invalid origin.'},403);
@@ -85,3 +85,7 @@ export async function onRequest(context){
 }
 function validate(d){const out={};for(const name of fields)out[name]=String(d[name]??'').trim();if(!out.business||out.business.length>180)return {error:'Business name required (max 180 characters).'};if(!['wholesale','advertising','retail'].includes(out.category))return {error:'Choose a category.'};if(!['New','Contacted','Interested','Follow-up Due','Negotiating','Closed Won','Closed Lost'].includes(out.status))return {error:'Choose a valid status.'};if(out.email&&(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(out.email)||out.email.length>254))return {error:'Invalid email.'};if(out.due&&!/^\d{4}-\d{2}-\d{2}$/.test(out.due))return {error:'Invalid due date.'};if(out.notes.length>5000)return {error:'Notes too long.'};return out;}
 function mapLead(d){return {id:d.id,business:d.business,category:d.category,contact:d.contact,email:d.email,phone:d.phone,website:d.website,city:d.city,status:d.status,notes:d.notes,due:d.due,lastSent:d.last_sent,assigned_to:d.assigned_to};}
+
+export async function onRequest(context){
+ try{return await handleRequest(context)}catch(error){console.error('Para Llevar API error',error);return json({error:'Server setup error. Please check Cloudflare Functions logs.',detail:error instanceof Error?error.message:'Unknown error'},500)}
+}
