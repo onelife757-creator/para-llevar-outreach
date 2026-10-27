@@ -21,7 +21,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS grant_opportunities (id TEXT PRIMARY KEY,name TEXT NOT NULL,organization TEXT NOT NULL DEFAULT '',url TEXT NOT NULL UNIQUE,deadline TEXT NOT NULL DEFAULT '',amount TEXT NOT NULL DEFAULT '',geography TEXT NOT NULL DEFAULT '',eligibility TEXT NOT NULL DEFAULT '',fit_score INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'To Review',notes TEXT NOT NULL DEFAULT '',discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS agent_runs (id TEXT PRIMARY KEY,agent TEXT NOT NULL,status TEXT NOT NULL,findings TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS prospect_territories (id TEXT PRIMARY KEY,state TEXT NOT NULL,city TEXT NOT NULL,category TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Queued',last_searched TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(state,city,category))"),
- db.prepare("CREATE TABLE IF NOT EXISTS prospect_candidates (id TEXT PRIMARY KEY,territory_id TEXT NOT NULL,name TEXT NOT NULL,website TEXT NOT NULL DEFAULT '',city TEXT NOT NULL, state TEXT NOT NULL,category TEXT NOT NULL,source_url TEXT NOT NULL DEFAULT '',fit_notes TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Review',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+ db.prepare("CREATE TABLE IF NOT EXISTS prospect_candidates (id TEXT PRIMARY KEY,territory_id TEXT NOT NULL,name TEXT NOT NULL,website TEXT NOT NULL DEFAULT '',city TEXT NOT NULL, state TEXT NOT NULL,category TEXT NOT NULL,source_url TEXT NOT NULL DEFAULT '',fit_notes TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Review',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+ db.prepare("CREATE TABLE IF NOT EXISTS candidate_research (candidate_id TEXT PRIMARY KEY,photo_url TEXT NOT NULL DEFAULT '',contact_url TEXT NOT NULL DEFAULT '',contact_email TEXT NOT NULL DEFAULT '',buyer_name TEXT NOT NULL DEFAULT '',products TEXT NOT NULL DEFAULT '',pitch TEXT NOT NULL DEFAULT '',fit_score INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -102,7 +103,7 @@ async function handleRequest(context){
  if(path==='/api/territories'&&method==='GET'){
   if(user.role!=='owner')return json({error:'Owner access required.'},403);
   const [territories,candidates]=await Promise.all([db.prepare('SELECT * FROM prospect_territories ORDER BY created_at DESC').all(),db.prepare("SELECT * FROM prospect_candidates ORDER BY created_at DESC LIMIT 500").all()]);
-  return json({territories:territories.results,candidates:candidates.results});
+  const research=(await db.prepare('SELECT * FROM candidate_research').all()).results;return json({territories:territories.results,candidates:candidates.results.map(c=>({...c,...(research.find(x=>x.candidate_id===c.id)||{})}))});
  }
  if(path==='/api/territories'&&method==='POST'){
   if(user.role!=='owner')return json({error:'Owner access required.'},403);
@@ -126,7 +127,10 @@ async function handleRequest(context){
   if(existing)return json({error:'Already in the shared lead database.'},409);
   const same=await db.prepare("SELECT id FROM prospect_candidates WHERE lower(name)=lower(?) AND lower(city)=lower(?) AND state=?").bind(name,t.city,t.state).first();
   if(same)return json({error:'Candidate already recorded.'},409);
-  await db.prepare("INSERT INTO prospect_candidates(id,territory_id,name,website,city,state,category,source_url,fit_notes) VALUES(?,?,?,?,?,?,?,?,?)").bind(random(),t.id,name,website,t.city,t.state,t.category,source,String(d.fit_notes||'').slice(0,2000)).run();return json({ok:true});
+  const id=random();await db.prepare("INSERT INTO prospect_candidates(id,territory_id,name,website,city,state,category,source_url,fit_notes) VALUES(?,?,?,?,?,?,?,?,?)").bind(id,t.id,name,website,t.city,t.state,t.category,source,String(d.fit_notes||'').slice(0,2000)).run();
+  const photo=String(d.photo_url||''),contact=String(d.contact_url||''),email=String(d.contact_email||''),buyer=String(d.buyer_name||''),products=String(d.products||''),pitch=String(d.pitch||''),score=Math.max(0,Math.min(100,Math.round(Number(d.fit_score)||0)));
+  if([photo,contact].every(x=>!x||/^https:\/\//.test(x))&&(!email||/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))await db.prepare("INSERT INTO candidate_research(candidate_id,photo_url,contact_url,contact_email,buyer_name,products,pitch,fit_score) VALUES(?,?,?,?,?,?,?,?)").bind(id,photo.slice(0,1200),contact.slice(0,1200),email.slice(0,250),buyer.slice(0,200),products.slice(0,3000),pitch.slice(0,4000),score).run();
+  return json({ok:true});
  }
  if(path==='/api/agent-runs'&&method==='GET'){
   if(user.role!=='owner')return json({error:'Owner access required.'},403);
