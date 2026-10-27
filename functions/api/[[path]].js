@@ -22,7 +22,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS agent_runs (id TEXT PRIMARY KEY,agent TEXT NOT NULL,status TEXT NOT NULL,findings TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS prospect_territories (id TEXT PRIMARY KEY,state TEXT NOT NULL,city TEXT NOT NULL,category TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'Queued',last_searched TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(state,city,category))"),
  db.prepare("CREATE TABLE IF NOT EXISTS prospect_candidates (id TEXT PRIMARY KEY,territory_id TEXT NOT NULL,name TEXT NOT NULL,website TEXT NOT NULL DEFAULT '',city TEXT NOT NULL, state TEXT NOT NULL,category TEXT NOT NULL,source_url TEXT NOT NULL DEFAULT '',fit_notes TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Review',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
- db.prepare("CREATE TABLE IF NOT EXISTS candidate_research (candidate_id TEXT PRIMARY KEY,photo_url TEXT NOT NULL DEFAULT '',contact_url TEXT NOT NULL DEFAULT '',contact_email TEXT NOT NULL DEFAULT '',buyer_name TEXT NOT NULL DEFAULT '',products TEXT NOT NULL DEFAULT '',pitch TEXT NOT NULL DEFAULT '',fit_score INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+ db.prepare("CREATE TABLE IF NOT EXISTS candidate_research (candidate_id TEXT PRIMARY KEY,photo_url TEXT NOT NULL DEFAULT '',contact_url TEXT NOT NULL DEFAULT '',contact_email TEXT NOT NULL DEFAULT '',buyer_name TEXT NOT NULL DEFAULT '',products TEXT NOT NULL DEFAULT '',pitch TEXT NOT NULL DEFAULT '',fit_score INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+ db.prepare("CREATE TABLE IF NOT EXISTS partnerships (id TEXT PRIMARY KEY,name TEXT NOT NULL,category TEXT NOT NULL,website TEXT NOT NULL,contact TEXT NOT NULL DEFAULT '',contact_url TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',collaboration TEXT NOT NULL DEFAULT '',value_prop TEXT NOT NULL DEFAULT '',source_url TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Research',notes TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -132,6 +133,26 @@ async function handleRequest(context){
   if([photo,contact].every(x=>!x||/^https:\/\//.test(x))&&(!email||/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))await db.prepare("INSERT INTO candidate_research(candidate_id,photo_url,contact_url,contact_email,buyer_name,products,pitch,fit_score) VALUES(?,?,?,?,?,?,?,?)").bind(id,photo.slice(0,1200),contact.slice(0,1200),email.slice(0,250),buyer.slice(0,200),products.slice(0,3000),pitch.slice(0,4000),score).run();
   return json({ok:true});
  }
+ if(path==='/api/partnerships'&&method==='GET'){
+ if(user.role!=='owner')return json({error:'Owner access required.'},403);
+ const {results}=await db.prepare('SELECT * FROM partnerships ORDER BY created_at DESC LIMIT 300').all();return json({partnerships:results});
+ }
+ if(path==='/api/partnerships'&&method==='POST'){
+ if(user.role!=='owner')return json({error:'Owner access required.'},403);
+ const d=await request.json().catch(()=>({})),name=String(d.name||'').trim(),website=String(d.website||'').trim(),category=String(d.category||'').trim();
+ if(!name||name.length>180||!/^https:\/\//.test(website)||!['Brands','Restaurants & Chefs','Hotels','Events','Cultural Organizations','Media','Other'].includes(category))return json({error:'Enter a valid name, category and official HTTPS website.'},400);
+ const existing=await db.prepare('SELECT id FROM partnerships WHERE lower(name)=lower(?) AND website=?').bind(name,website).first();if(existing)return json({error:'Already in the partnership pipeline.'},409);
+ const fields=['contact','contact_url','city','collaboration','value_prop','source_url','notes'].map(k=>String(d[k]||'').trim().slice(0,2000));
+ if([fields[1],fields[5]].some(x=>x&&!/^https:\/\//.test(x)))return json({error:'Contact and source links must use HTTPS.'},400);
+ await db.prepare('INSERT INTO partnerships(id,name,category,website,contact,contact_url,city,collaboration,value_prop,source_url,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(random(),name,category,website,...fields).run();return json({ok:true});
+ }
+ const partnershipMatch=path.match(/^\/api\/partnerships\/([^/]+)$/);
+ if(partnershipMatch&&method==='PATCH'){
+ if(user.role!=='owner')return json({error:'Owner access required.'},403);
+ const d=await request.json().catch(()=>({}));
+ if(!['Research','Qualified','Contacted','In Conversation','Proposal','Partnered','Declined'].includes(d.status))return json({error:'Invalid partnership status.'},400);
+ await db.prepare('UPDATE partnerships SET status=? WHERE id=?').bind(d.status,partnershipMatch[1]).run();return json({ok:true});
+ }
  if(path==='/api/agent-runs'&&method==='GET'){
   if(user.role!=='owner')return json({error:'Owner access required.'},403);
   const {results}=await db.prepare('SELECT id,agent,status,findings,created_at FROM agent_runs ORDER BY created_at DESC LIMIT 100').all();
@@ -140,7 +161,7 @@ async function handleRequest(context){
  if(path==='/api/agent-runs'&&method==='POST'){
   if(user.role!=='owner')return json({error:'Owner access required.'},403);
   const d=await request.json().catch(()=>({}));
-  if(!['restock','stockist','grants','editorial'].includes(d.agent))return json({error:'Unknown agent.'},400);
+  if(!['restock','stockist','grants','editorial','partnerships'].includes(d.agent))return json({error:'Unknown agent.'},400);
   let findings=[];
   if(d.agent==='restock'){
    const {results}=await db.prepare("SELECT l.id,l.business,l.city,p.next_check,p.interval_months FROM restock_policies p JOIN leads l ON l.id=p.lead_id LEFT JOIN lead_workspace w ON w.lead_id=l.id WHERE l.category='wholesale' AND COALESCE(w.archived,0)=0 AND p.next_check<>'' AND p.next_check<=date('now') ORDER BY p.next_check LIMIT 200").all();
@@ -151,6 +172,9 @@ async function handleRequest(context){
   }else if(d.agent==='grants'){
    const {results}=await db.prepare("SELECT name,deadline,status,eligibility,geography FROM grant_opportunities WHERE status IN ('To Review','Eligible','Applying') ORDER BY CASE WHEN deadline='' THEN 1 ELSE 0 END,deadline LIMIT 40").all();
    findings=results.map(r=>({business:r.name,due:r.deadline||'Unconfirmed',message:r.status+' · Verify application remains open, entity eligibility, location requirements and funding restrictions. '+(r.eligibility?'Eligibility notes available.':'Eligibility research missing.')}));
+  }else if(d.agent==='partnerships'){
+   const {results}=await db.prepare("SELECT name,category,collaboration,value_prop,status FROM partnerships WHERE status IN ('Research','Qualified','In Conversation','Proposal') ORDER BY created_at DESC LIMIT 40").all();
+   findings=results.map(r=>({business:r.name,due:r.status,message:r.category+' · Opportunity: '+(r.collaboration||'not defined')+' · Mutual value: '+(r.value_prop||'needs research')}));
   }else{
    const {results}=await db.prepare("SELECT title,article_url,audience,updated_at FROM editorial_campaigns WHERE status='draft' ORDER BY updated_at DESC LIMIT 40").all();
    findings=results.map(r=>({business:r.title,due:r.updated_at,message:'Review article link, segment, subject, formatting and personalized message before approving distribution to '+r.audience+'.'}));
