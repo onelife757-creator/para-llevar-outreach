@@ -140,11 +140,22 @@ async function handleRequest(context){
  if(path==='/api/agent-runs'&&method==='POST'){
   if(user.role!=='owner')return json({error:'Owner access required.'},403);
   const d=await request.json().catch(()=>({}));
-  if(!['restock','stockist','grants'].includes(d.agent))return json({error:'Unknown agent.'},400);
-  if(d.agent!=='restock')return json({error:'External research is not configured for this agent yet.'},409);
-  const {results}=await db.prepare("SELECT l.id,l.business,l.city,p.next_check,p.interval_months,p.last_checked FROM restock_policies p JOIN leads l ON l.id=p.lead_id LEFT JOIN lead_workspace w ON w.lead_id=l.id WHERE l.category='wholesale' AND COALESCE(w.archived,0)=0 AND p.next_check<>'' AND p.next_check<=date('now') ORDER BY p.next_check LIMIT 200").all();
-  const findings=results.map(r=>({lead_id:r.id,business:r.business,city:r.city,due:r.next_check,months:r.interval_months,message:'Review stock history and confirm remaining copies before proposing a restock.'}));
-  const id=random();await db.prepare('INSERT INTO agent_runs(id,agent,status,findings,created_by) VALUES(?,?,?,?,?)').bind(id,'restock','review',JSON.stringify(findings),user.id).run();
+  if(!['restock','stockist','grants','editorial'].includes(d.agent))return json({error:'Unknown agent.'},400);
+  let findings=[];
+  if(d.agent==='restock'){
+   const {results}=await db.prepare("SELECT l.id,l.business,l.city,p.next_check,p.interval_months FROM restock_policies p JOIN leads l ON l.id=p.lead_id LEFT JOIN lead_workspace w ON w.lead_id=l.id WHERE l.category='wholesale' AND COALESCE(w.archived,0)=0 AND p.next_check<>'' AND p.next_check<=date('now') ORDER BY p.next_check LIMIT 200").all();
+   findings=results.map(r=>({lead_id:r.id,business:r.business,city:r.city,due:r.next_check,message:'Check current inventory and ask whether they would like to restock.'}));
+  }else if(d.agent==='stockist'){
+   const {results}=await db.prepare("SELECT t.id,t.city,t.state,t.category,t.status,COUNT(c.id) candidate_count FROM prospect_territories t LEFT JOIN prospect_candidates c ON c.territory_id=t.id WHERE t.status!='Reviewed' GROUP BY t.id ORDER BY CASE t.status WHEN 'Researching' THEN 0 ELSE 1 END,t.created_at LIMIT 30").all();
+   findings=results.map(r=>({business:r.city+', '+r.state,category:r.category,due:r.status,message:r.candidate_count+' candidates saved. Research official websites, retail assortment, contact paths and independent publications; verify before adding.'}));
+  }else if(d.agent==='grants'){
+   const {results}=await db.prepare("SELECT name,deadline,status,eligibility,geography FROM grant_opportunities WHERE status IN ('To Review','Eligible','Applying') ORDER BY CASE WHEN deadline='' THEN 1 ELSE 0 END,deadline LIMIT 40").all();
+   findings=results.map(r=>({business:r.name,due:r.deadline||'Unconfirmed',message:r.status+' · Verify application remains open, entity eligibility, location requirements and funding restrictions. '+(r.eligibility?'Eligibility notes available.':'Eligibility research missing.')}));
+  }else{
+   const {results}=await db.prepare("SELECT title,article_url,audience,updated_at FROM editorial_campaigns WHERE status='draft' ORDER BY updated_at DESC LIMIT 40").all();
+   findings=results.map(r=>({business:r.title,due:r.updated_at,message:'Review article link, segment, subject, formatting and personalized message before approving distribution to '+r.audience+'.'}));
+  }
+  const id=random();await db.prepare('INSERT INTO agent_runs(id,agent,status,findings,created_by) VALUES(?,?,?,?,?)').bind(id,d.agent,'review',JSON.stringify(findings),user.id).run();
   return json({ok:true,id,count:findings.length,findings});
  }
  if(path==='/api/grants'&&method==='GET'){
