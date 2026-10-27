@@ -80,6 +80,8 @@ async function handleRequest(context){
  }
  if(path==='/api/leads'&&method==='POST'){
   const d=await request.json().catch(()=>({})),data=validate(d);if(data.error)return json({error:data.error},400);
+  const existing=await db.prepare("SELECT id,category FROM leads WHERE LOWER(TRIM(business))=LOWER(TRIM(?)) AND (LOWER(TRIM(city))=LOWER(TRIM(?)) OR TRIM(city)='' OR TRIM(?)='') LIMIT 1").bind(data.business,data.city,data.city).first();
+  if(existing)return json({error:'This business is already in the shared lead database. Ask the Owner to review or reassign it rather than creating a second record.'},409);
   const assigned=user.role==='owner'&&d.assigned_to?String(d.assigned_to):user.id;
   const permitted=await db.prepare('SELECT id FROM members WHERE id=? AND active=1').bind(assigned).first();if(!permitted)return json({error:'Unknown assignee.'},400);
   const id=random();
