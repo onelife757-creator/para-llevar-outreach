@@ -24,7 +24,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS prospect_candidates (id TEXT PRIMARY KEY,territory_id TEXT NOT NULL,name TEXT NOT NULL,website TEXT NOT NULL DEFAULT '',city TEXT NOT NULL, state TEXT NOT NULL,category TEXT NOT NULL,source_url TEXT NOT NULL DEFAULT '',fit_notes TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Review',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS candidate_research (candidate_id TEXT PRIMARY KEY,photo_url TEXT NOT NULL DEFAULT '',contact_url TEXT NOT NULL DEFAULT '',contact_email TEXT NOT NULL DEFAULT '',buyer_name TEXT NOT NULL DEFAULT '',products TEXT NOT NULL DEFAULT '',pitch TEXT NOT NULL DEFAULT '',fit_score INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS partnerships (id TEXT PRIMARY KEY,name TEXT NOT NULL,category TEXT NOT NULL,website TEXT NOT NULL,contact TEXT NOT NULL DEFAULT '',contact_url TEXT NOT NULL DEFAULT '',city TEXT NOT NULL DEFAULT '',collaboration TEXT NOT NULL DEFAULT '',value_prop TEXT NOT NULL DEFAULT '',source_url TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'Research',notes TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
- db.prepare("CREATE TABLE IF NOT EXISTS offer_settings (id TEXT PRIMARY KEY,answers TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+ db.prepare("CREATE TABLE IF NOT EXISTS offer_settings (id TEXT PRIMARY KEY,answers TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+ db.prepare("CREATE TABLE IF NOT EXISTS business_results (id TEXT PRIMARY KEY,kind TEXT NOT NULL,partner TEXT NOT NULL,amount_cents INTEGER NOT NULL DEFAULT 0,currency TEXT NOT NULL DEFAULT 'USD',occurred_on TEXT NOT NULL,notes TEXT NOT NULL DEFAULT '',created_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -163,6 +164,27 @@ async function handleRequest(context){
   const id=random();await db.prepare("INSERT INTO prospect_candidates(id,territory_id,name,website,city,state,category,source_url,fit_notes) VALUES(?,?,?,?,?,?,?,?,?)").bind(id,t.id,name,website,t.city,t.state,t.category,source,String(d.fit_notes||'').slice(0,2000)).run();
   const photo=String(d.photo_url||''),contact=String(d.contact_url||''),email=String(d.contact_email||''),buyer=String(d.buyer_name||''),products=String(d.products||''),pitch=String(d.pitch||''),score=Math.max(0,Math.min(100,Math.round(Number(d.fit_score)||0)));
   if([photo,contact].every(x=>!x||/^https:\/\//.test(x))&&(!email||/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))await db.prepare("INSERT INTO candidate_research(candidate_id,photo_url,contact_url,contact_email,buyer_name,products,pitch,fit_score) VALUES(?,?,?,?,?,?,?,?)").bind(id,photo.slice(0,1200),contact.slice(0,1200),email.slice(0,250),buyer.slice(0,200),products.slice(0,3000),pitch.slice(0,4000),score).run();
+  return json({ok:true});
+ }
+ if(path==='/api/results'&&method==='GET'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const [recorded,leads,partners,stockists,events]=await Promise.all([
+   db.prepare('SELECT * FROM business_results ORDER BY occurred_on DESC,created_at DESC LIMIT 500').all(),
+   db.prepare("SELECT category,status,COUNT(*) total FROM leads GROUP BY category,status").all(),
+   db.prepare("SELECT status,COUNT(*) total FROM partnerships GROUP BY status").all(),
+   db.prepare("SELECT COUNT(*) total FROM prospect_candidates").first(),
+   db.prepare("SELECT action,COUNT(*) total FROM events GROUP BY action").all()
+  ]);
+  return json({recorded:recorded.results,leads:leads.results,partners:partners.results,stockist_candidates:stockists?.total||0,events:events.results});
+ }
+ if(path==='/api/results'&&method==='POST'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const d=await request.json().catch(()=>({}));
+  const allowed=['wholesale_order','advertising_sale','partnership_revenue','other_revenue','meeting','new_stockist','partnership_signed'];
+  const kind=String(d.kind||''),partner=String(d.partner||'').trim(),date=String(d.occurred_on||''),amount=Number(d.amount||0);
+  if(!allowed.includes(kind)||!partner||partner.length>200||!/^\d{4}-\d{2}-\d{2}$/.test(date)||!Number.isFinite(amount)||amount<0||amount>100000000||!/^[A-Z]{3}$/.test(String(d.currency||'USD')))return json({error:'Enter a valid result, partner, date, amount and currency.'},400);
+  if(['meeting','new_stockist','partnership_signed'].includes(kind)&&amount!==0)return json({error:'Use a revenue result type when recording revenue.'},400);
+  await db.prepare('INSERT INTO business_results(id,kind,partner,amount_cents,currency,occurred_on,notes,created_by) VALUES(?,?,?,?,?,?,?,?)').bind(random(),kind,partner,Math.round(amount*100),String(d.currency||'USD'),date,String(d.notes||'').slice(0,2500),user.id).run();
   return json({ok:true});
  }
  if(path==='/api/partnerships'&&method==='GET'){
