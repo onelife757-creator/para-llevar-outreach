@@ -17,7 +17,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE TABLE IF NOT EXISTS stock_counts (lead_id TEXT NOT NULL,title TEXT NOT NULL,received INTEGER NOT NULL DEFAULT 0,sold INTEGER NOT NULL DEFAULT 0,returned INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(lead_id,title))"),
  db.prepare("CREATE TABLE IF NOT EXISTS historical_stock (lead_id TEXT NOT NULL,issue TEXT NOT NULL,received INTEGER,remaining INTEGER,source TEXT NOT NULL DEFAULT '',source_date TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(lead_id,issue))"),
  db.prepare("CREATE TABLE IF NOT EXISTS editorial_campaigns (article_url TEXT PRIMARY KEY,title TEXT NOT NULL,subject TEXT NOT NULL,body TEXT NOT NULL,audience TEXT NOT NULL DEFAULT 'stockists',status TEXT NOT NULL DEFAULT 'draft',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
- db.prepare("CREATE TABLE IF NOT EXISTS substack_cache (id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+ db.prepare("CREATE TABLE IF NOT EXISTS substack_cache (id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+ db.prepare("CREATE TABLE IF NOT EXISTS grant_opportunities (id TEXT PRIMARY KEY,name TEXT NOT NULL,organization TEXT NOT NULL DEFAULT '',url TEXT NOT NULL UNIQUE,deadline TEXT NOT NULL DEFAULT '',amount TEXT NOT NULL DEFAULT '',geography TEXT NOT NULL DEFAULT '',eligibility TEXT NOT NULL DEFAULT '',fit_score INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'To Review',notes TEXT NOT NULL DEFAULT '',discovered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -94,6 +95,29 @@ async function handleRequest(context){
   const payload={articles:items,feed:target};
   if(items.length)await db.prepare('INSERT INTO substack_cache(id,payload) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=CURRENT_TIMESTAMP').bind(JSON.stringify(payload)).run();
   return json(payload);
+ }
+ if(path==='/api/grants'&&method==='GET'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const {results}=await db.prepare('SELECT * FROM grant_opportunities ORDER BY CASE WHEN deadline IS NULL OR deadline="" THEN 1 ELSE 0 END,deadline,updated_at DESC').all();
+  return json({grants:results});
+ }
+ if(path==='/api/grants'&&method==='POST'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const d=await request.json().catch(()=>({}));
+  const name=String(d.name||'').trim(),url=String(d.url||'').trim(),organization=String(d.organization||'').trim();
+  if(!name||name.length>250||!/^https:\/\//i.test(url)||url.length>1500)return json({error:'Enter a grant name and an official HTTPS application URL.'},400);
+  const status=['To Review','Eligible','Applying','Submitted','Awarded','Not Eligible','Closed'].includes(d.status)?d.status:'To Review';
+  const deadline=String(d.deadline||'');if(deadline&&!/^\d{4}-\d{2}-\d{2}$/.test(deadline))return json({error:'Use YYYY-MM-DD for the deadline.'},400);
+  const values=[name,organization.slice(0,250),url,deadline,String(d.amount||'').slice(0,150),String(d.geography||'').slice(0,250),String(d.eligibility||'').slice(0,4000),Math.max(0,Math.min(100,Math.round(Number(d.fit_score)||0))),status,String(d.notes||'').slice(0,5000)];
+  await db.prepare('INSERT INTO grant_opportunities(id,name,organization,url,deadline,amount,geography,eligibility,fit_score,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET name=excluded.name,organization=excluded.organization,deadline=excluded.deadline,amount=excluded.amount,geography=excluded.geography,eligibility=excluded.eligibility,fit_score=excluded.fit_score,status=excluded.status,notes=excluded.notes,updated_at=CURRENT_TIMESTAMP').bind(random(),...values).run();
+  return json({ok:true});
+ }
+ const grantMatch=path.match(/^\/api\/grants\/([^/]+)$/);
+ if(grantMatch&&method==='PATCH'){
+  if(user.role!=='owner')return json({error:'Owner access required.'},403);
+  const d=await request.json().catch(()=>({}));const allowed=['To Review','Eligible','Applying','Submitted','Awarded','Not Eligible','Closed'];
+  if(!allowed.includes(d.status))return json({error:'Invalid grant status.'},400);
+  await db.prepare('UPDATE grant_opportunities SET status=?,notes=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(d.status,String(d.notes||'').slice(0,5000),grantMatch[1]).run();return json({ok:true});
  }
  if(path==='/api/editorial-campaigns'&&method==='GET'){
   const {results}=await db.prepare('SELECT * FROM editorial_campaigns ORDER BY updated_at DESC').all();
