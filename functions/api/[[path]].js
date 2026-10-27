@@ -12,7 +12,8 @@ async function tables(db){await db.batch([
  db.prepare("CREATE INDEX IF NOT EXISTS idx_pl_leads_assigned ON leads(assigned_to,updated_at)"),
  db.prepare("CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY,lead_id TEXT NOT NULL,member_id TEXT NOT NULL,action TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
  db.prepare("CREATE TABLE IF NOT EXISTS login_limits (identity TEXT PRIMARY KEY,attempts INTEGER NOT NULL DEFAULT 0,blocked_until INTEGER NOT NULL DEFAULT 0)"),
- db.prepare("CREATE TABLE IF NOT EXISTS lead_workspace (lead_id TEXT PRIMARY KEY,research TEXT NOT NULL DEFAULT '',opportunity TEXT NOT NULL DEFAULT '',draft TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT 'email',score INTEGER NOT NULL DEFAULT 50,archived INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+ db.prepare("CREATE TABLE IF NOT EXISTS lead_workspace (lead_id TEXT PRIMARY KEY,research TEXT NOT NULL DEFAULT '',opportunity TEXT NOT NULL DEFAULT '',draft TEXT NOT NULL DEFAULT '',channel TEXT NOT NULL DEFAULT 'email',score INTEGER NOT NULL DEFAULT 50,archived INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"),
+ db.prepare("CREATE TABLE IF NOT EXISTS restock_policies (lead_id TEXT PRIMARY KEY,interval_months INTEGER NOT NULL DEFAULT 3,last_checked TEXT NOT NULL DEFAULT '',next_check TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 ]);}
 async function userFor(req,db){
  const token=(req.headers.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('__Host-pl_session='))?.slice(18);
@@ -74,6 +75,33 @@ async function handleRequest(context){
   if(name.length<2||name.length>80||!/^[0-9]{4,8}$/.test(pin))return json({error:'Name and 4 to 8 digit PIN required.'},400);
   const salt=random();try{await db.prepare("INSERT INTO members(id,name,role,pin_salt,pin_hash) VALUES(?,?,'caller',?,?)").bind(random(),name,salt,await hashPin(pin,salt)).run();}catch{return json({error:'Could not add team member. Check for duplicate names.'},409);}
   return json({ok:true});
+ }
+ if(path==='/api/restock'&&method==='GET'){
+  const {results}=await db.prepare("SELECT p.*,l.business,l.category,l.assigned_to FROM restock_policies p JOIN leads l ON l.id=p.lead_id WHERE ?='owner' OR l.assigned_to=? ORDER BY p.next_check").bind(user.role,user.id).all();
+  return json({policies:results});
+ }
+ const restockMatch=path.match(/^\\/api\\/restock\\/([^/]+)$/);
+ if(restockMatch&&method==='PATCH'){
+  const lead=await db.prepare("SELECT id,assigned_to,category FROM leads WHERE id=?").bind(restockMatch[1]).first();
+  if(!lead||(user.role!=='owner'&&lead.assigned_to!==user.id))return json({error:'No access to this stockist.'},403);
+  if(lead.category!=='wholesale')return json({error:'Restock scheduling is for wholesale stockists.'},400);
+  const d=await request.json().catch(()=>({}));
+  const months=Number(d.interval_months);
+  if(!Number.isInteger(months)||months<1||months>24)return json({error:'Choose 1 to 24 months.'},400);
+  const last=String(d.last_checked||'');
+  if(last&&!/^\\d{4}-\\d{2}-\\d{2}$/.test(last))return json({error:'Enter a valid date.'},400);
+  const base=last?new Date(last+'T12:00:00Z'):new Date();
+  if(Number.isNaN(base.getTime()))return json({error:'Invalid check-in date.'},400);
+  const day=base.getUTCDate();
+  const target=new Date(Date.UTC(base.getUTCFullYear(),base.getUTCMonth()+months,1,12));
+  const monthEnd=new Date(Date.UTC(target.getUTCFullYear(),target.getUTCMonth()+1,0,12)).getUTCDate();
+  target.setUTCDate(Math.min(day,monthEnd));
+  const next=target.toISOString().slice(0,10);
+  await db.batch([
+   db.prepare("INSERT INTO restock_policies(lead_id,interval_months,last_checked,next_check) VALUES(?,?,?,?) ON CONFLICT(lead_id) DO UPDATE SET interval_months=excluded.interval_months,last_checked=excluded.last_checked,next_check=excluded.next_check,updated_at=CURRENT_TIMESTAMP").bind(lead.id,months,last,next),
+   db.prepare("INSERT INTO events(id,lead_id,member_id,action) VALUES(?,?,?,?)").bind(random(),lead.id,user.id,'restock_schedule_updated')
+  ]);
+  return json({ok:true,next_check:next});
  }
  if(path==='/api/workspace'&&method==='GET'){
   const {results}=await db.prepare("SELECT w.* FROM lead_workspace w JOIN leads l ON l.id=w.lead_id WHERE ?='owner' OR l.assigned_to=?").bind(user.role,user.id).all();
