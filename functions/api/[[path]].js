@@ -84,18 +84,19 @@ async function handleRequest(context){
   const tidy=x=>String(x||'').trim();
   const key=x=>tidy(x).toLowerCase().replace(/[^a-z0-9]/g,'').replace(/newsstand/g,'newstand');
   let added=0,skipped=0,stockAdded=0;
+  const existingRows=(await db.prepare("SELECT id,business,city FROM leads WHERE category='wholesale'").all()).results;
   for(const raw of payload.records){
    const name=tidy(raw.business).slice(0,180),city=tidy(raw.city).slice(0,180);
    if(!name){skipped++;continue}
-   const all=await db.prepare("SELECT id,business,city FROM leads WHERE category='wholesale'").all();
-   const matched=all.results.find(x=>key(x.business)===key(name)&&(key(x.city)===key(city)||!key(x.city)||!key(city)));
+   const matched=existingRows.find(x=>key(x.business)===key(name)&&(key(x.city)===key(city)||!key(x.city)||!key(city)));
    let id=matched?.id;
    if(!id){
     id=random();
-    const contact=tidy(raw.contact).slice(0,250),email=/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(tidy(raw.email))?tidy(raw.email).slice(0,254):'';
+    const contact=tidy(raw.contact).slice(0,250),email=/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(tidy(raw.email))?tidy(raw.email).slice(0,254):'';
     const notes=('Imported source: '+tidy(raw.source)+'\\n'+tidy(raw.notes)).slice(0,5000);
     await db.prepare("INSERT INTO leads(id,business,category,contact,email,city,status,notes,assigned_to,created_by) VALUES(?,?,'wholesale',?,?,?,'New',?,?,?)").bind(id,name,contact,email,city,notes,user.id,user.id).run();
     await db.prepare("INSERT INTO events(id,lead_id,member_id,action) VALUES(?,?,?,?)").bind(random(),id,user.id,'imported_from_spreadsheet').run();
+    existingRows.push({id,business:name,city});
     added++;
    }else skipped++;
    // Historical counts remain in source notes until the publication/issue mix is confirmed.
